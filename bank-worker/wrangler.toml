@@ -1,0 +1,10 @@
+name = "mashuca-bank"
+main = "worker.js"
+compatibility_date = "2026-09-01"
+
+[vars]
+# Troque pelos seus valores (ou defina no painel da Cloudflare)
+ALLOWED_ORIGINS = "https://SEU_USUARIO.github.io,https://localhost"
+FIREBASE_PROJECT_ID = "SEU_PROJETO_FIREBASE"
+ALLOWED_EMAILS = "seu-email@gmail.com"
+# Secrets (não coloque aqui): EB_APP_ID, EB_PRIVATE_KEY, PLUGGY_CLIENT_ID, PLUGGY_CLIENT_SECRET
