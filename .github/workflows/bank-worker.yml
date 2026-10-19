@@ -1,0 +1,29 @@
+name: Publicar servidor bancário (Cloudflare)
+
+# Opcional: publica bank-worker/worker.js na sua conta Cloudflare.
+# Secrets necessários: CLOUDFLARE_API_TOKEN (modelo "Edit Cloudflare Workers") e CLOUDFLARE_ACCOUNT_ID.
+# As chaves dos bancos ficam só no painel da Cloudflare (Settings › Variables and Secrets).
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["bank-worker/**"]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      HAS_CF: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verificar secrets
+        if: env.HAS_CF != 'true'
+        run: echo "::notice::Sem CLOUDFLARE_API_TOKEN; publique o Worker pelo painel da Cloudflare (veja o README)." 
+      - uses: cloudflare/wrangler-action@v3
+        if: env.HAS_CF == 'true'
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: bank-worker
+          command: deploy --keep-vars
