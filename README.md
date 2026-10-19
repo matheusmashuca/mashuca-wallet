@@ -3,6 +3,7 @@
 Finanças pessoais multimoeda (contas, cartões e faturas, câmbio do BCE, importação e conciliação) para **web (GitHub Pages)** e **Android (Google Play)**, com login Google e dados no Firebase.
 
 ```
+bank-worker/            servidor de conexão bancária (Cloudflare Worker)
 src/app.html            o aplicativo (mesmo código da versão no Claude)
 config.js               configuração do Firebase e do câmbio  ← você edita
 public/                 ícones, manifest, service worker, política de privacidade
@@ -109,6 +110,66 @@ Na versão dentro do Claude o compartilhamento não está disponível; ele depen
 
 - Mudou o app? Edite `src/app.html` e faça push: o site atualiza sozinho. Para o Android, rode o workflow de novo e envie o novo `.aab`.
 - Teste local: `npm run build && npm run serve` → <http://localhost:8080>.
+
+## 7. Conexão automática com bancos (opcional)
+
+O app busca transações e saldos direto dos bancos e manda tudo para a tela **Importar**, onde a conciliação de sempre funciona: o que já existe é conciliado, o resto vira lançamento novo, e nada é gravado sem você confirmar. O acesso é **só leitura**.
+
+| Onde | Agregador | Custo |
+|---|---|---|
+| França e UE (PSD2) | Enable Banking, modo "contas vinculadas" | uso pessoal e não comercial, sem contrato; confira as condições no painel |
+| Brasil (Open Finance) | Pluggy, via Meu Pluggy | conexão das suas contas gratuita; planos comerciais são pagos |
+| Servidor que guarda as chaves | Cloudflare Workers | plano gratuito (100 mil chamadas por dia), sem cartão |
+
+As chaves dos agregadores **nunca** ficam no app nem no GitHub: só no servidor. O servidor só atende o seu site, só aceita o seu login Google (lista de e-mails) e só devolve transações e saldos.
+
+### 7.1 Servidor (Cloudflare Worker), tudo pelo navegador
+
+1. Crie uma conta grátis em <https://dash.cloudflare.com>.
+2. **Workers & Pages › Create › Start with Hello World**, nome `mashuca-bank`, **Deploy**.
+3. **Edit code**: apague o exemplo, cole todo o conteúdo de `bank-worker/worker.js` e clique em **Deploy**.
+4. **Settings › Variables and Secrets › Add**, como *Text*:
+   - `ALLOWED_ORIGINS` = `https://SEU_USUARIO.github.io,https://localhost`
+   - `FIREBASE_PROJECT_ID` = o ID do projeto Firebase (o mesmo `projectId` do `config.js`)
+   - `ALLOWED_EMAILS` = seu e-mail Google (e o da sua esposa, separados por vírgula)
+5. Anote o endereço do Worker (ex.: `https://mashuca-bank.seu-usuario.workers.dev`). Abrir `…/health` no navegador deve mostrar `{"ok":true,…}`.
+
+Alternativa: com os secrets `CLOUDFLARE_API_TOKEN` e `CLOUDFLARE_ACCOUNT_ID` no GitHub, o workflow **Publicar servidor bancário** publica o Worker sozinho a cada mudança em `bank-worker/`.
+
+### 7.2 França e UE: Enable Banking
+
+1. Crie a conta em <https://enablebanking.com> e abra o **Control Panel**.
+2. **Applications › Register new application**: ambiente **Production**; em *Redirect URLs* coloque `https://SEU_USUARIO.github.io/mashuca-wallet/`; gere a chave no navegador e **guarde o arquivo .pem** que é baixado.
+3. Clique em **Activate by linking accounts** e autorize, no site de cada banco, as contas que você vai usar (Boursorama, Caisse d'Epargne…). Só contas vinculadas ficam acessíveis.
+4. No Worker, adicione como **Secret**:
+   - `EB_APP_ID` = o ID da aplicação
+   - `EB_PRIVATE_KEY` = todo o conteúdo do .pem (de `-----BEGIN PRIVATE KEY-----` até o fim)
+
+### 7.3 Brasil: Pluggy
+
+1. Crie a conta em <https://dashboard.pluggy.ai>, crie um time e uma aplicação; copie **Client ID** e **Client Secret**.
+2. No Worker, adicione como **Secret**: `PLUGGY_CLIENT_ID` e `PLUGGY_CLIENT_SECRET`.
+3. Em <https://meu.pluggy.ai>, conecte seus bancos (Nubank, Itaú, Bradesco…) com a autorização no app do banco. Faça isso enquanto o período de teste da conta de desenvolvedor estiver ativo; as conexões continuam depois dele.
+4. No painel da Pluggy: sua aplicação › **Ir para Demo** › menu ⋮ do banco › **Copiar Item ID**. Um Item ID por banco.
+
+### 7.4 No app
+
+1. **Cadastros › Conexões bancárias**: cole o endereço do Worker, **Salvar** e **Testar servidor** (mostra se França/UE e Brasil estão prontos).
+2. **+ França / UE**: escolha o país e o banco, **Ir para o banco**, autorize e você volta ao app. Faça isso pelo **site** (no app Android o retorno do banco abre o navegador).
+3. **+ Brasil**: cole o Item ID.
+4. Ligue cada conta do banco a uma conta ou cartão do app e clique em **Salvar e sincronizar**. As transações aparecem em **Importar** para revisão.
+5. Com **Sincronizar ao abrir o app** ligado, o app busca novidades a cada 6 horas e avisa quando há lançamentos para revisar.
+6. O consentimento PSD2 dura até 180 dias; o app avisa 10 dias antes e o botão **Renovar** refaz a autorização mantendo as ligações das contas.
+
+Para conhecer o fluxo sem configurar nada, digite `demo` no endereço do servidor: o app simula um banco francês e um brasileiro com os seus próprios dados.
+
+### O que a conciliação faz com os dados do banco
+
+- **Valor e data iguais** a um lançamento seu: conciliação automática, que fica "A validar" no painel.
+- **Já conciliado antes** por arquivo OFX ou CSV: a linha vem desmarcada, para não duplicar, e o app lembra dela nas próximas sincronizações.
+- **Uma linha do banco que paga vários lançamentos** (débito agrupado, fatura): botão **Vários…**; **Sugerir combinação** acha os lançamentos que somam o valor, e a diferença (tarifa, juros) pode virar um lançamento com categoria.
+- **Lançamento novo**: categoria pelos padrões (aceitam alternativas, `ifood | rappi`) ou, sem padrão, pelo histórico dos seus lançamentos parecidos.
+- **Saldo**: o saldo informado pelo banco (conexão ou OFX) aparece no extrato da conta, com a diferença para o saldo do app e o botão Ajustar saldo.
 
 ## Observações
 
