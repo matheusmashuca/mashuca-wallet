@@ -435,7 +435,7 @@ function subscribe(){
     if(firstSnap){firstSnap=false;afterLoad()}else render();
   },err=>{state.mode="local";lsLoad();afterLoad();toast("Sem conexão com o armazenamento; usando modo local.")});
 }
-function afterLoad(){if(state.cfg){LANG=state.cfg.profile.language||"pt";ui.regime=state.cfg.dash?.regime||"competencia";pickDefaults()}render();if(state.cfg)setTimeout(autoConfirmDue,0)}
+function afterLoad(){if(state.cfg){LANG=state.cfg.profile.language||"pt";ui.regime=state.cfg.dash?.regime||"competencia";pickDefaults()}render();if(state.cfg){setTimeout(autoConfirmDue,0);setTimeout(()=>{bankCheckReturn();bankAutoSync()},0)}}
 function pickDefaults(){
   const accs=activeAccounts();
   if(!ui.acct||!getAcc(ui.acct)){const a=accs.find(a=>a.type!=="card");ui.acct=a?a.id:null}
@@ -859,7 +859,7 @@ function applyPlan(plan,defKey,vals,mm){
 
 /* ===================== settings ===================== */
 function viewSettings(){
-  const tabs=[["profile",t("profile")],["params","Parâmetros"],["accounts",t("accounts")],["categories",t("categories")],["rates",t("rates")],["rules","Padrões e bloqueios"],["display","Aparência"],["lists","Clientes e fornecedores"],["io","Exportar e importar"],["backup",t("backup")]];
+  const tabs=[["profile",t("profile")],["params","Parâmetros"],["accounts",t("accounts")],["categories",t("categories")],["rates",t("rates")],["rules","Padrões e bloqueios"],["bank","Conexões bancárias"],["display","Aparência"],["lists","Clientes e fornecedores"],["io","Exportar e importar"],["backup",t("backup")]];
   const tab=ui.setTab;let body="";
   if(tab==="profile")body=profileForm(state.cfg.profile)+`<div class="tools"><button class="btn primary" data-act="saveProfile">${t("save")}</button></div>`;
   if(tab==="accounts"){
@@ -887,6 +887,7 @@ function viewSettings(){
   if(tab==="lists")body=partiesTab();
   if(tab==="params")body=paramsTab();
   if(tab==="io")body=ioTab();
+  if(tab==="bank")body=bankTab();
   if(tab==="backup"){
     const n=allTx().length;
     body=`<p>${n} lançamentos em ${Object.keys(state.months).length} meses · ${state.cfg.accounts.length} contas. ${state.mode==="cloud"?"Os dados ficam na sua conta e só você os vê.":"Modo local: os dados ficam só neste navegador. Exporte um backup com frequência."}</p>
@@ -1284,7 +1285,7 @@ function splitNotifications(text){
 /* ---------- rules, blocks, matching ---------- */
 function ruleMatches(r,row){
   const hay=r.field==="source"?norm(row.source):r.field==="desc"?norm(row.desc):norm(row.desc+" "+row.source+" "+(row.raw||""));
-  return r.pattern&&hay.includes(norm(r.pattern));
+  return rulePatterns(r).some(p=>hay.includes(p));
 }
 function blockHit(row){
   return cfgBlocks().find(b=>b.type==="source"?norm(row.source)===norm(b.value)||norm(row.source).includes(norm(b.value)):norm(row.desc+" "+(row.raw||"")).includes(norm(b.value)));
@@ -1317,7 +1318,7 @@ function candidatesFor(row,opts={}){
   for(const tx of allTx()){
     if(tx.importId&&tx.importId===row.fitid)continue;
     if(!opts.anyStatus&&!mf.st[mState(tx)])continue;
-    if(!opts.anyDate&&!inWindow(tx,row,mf))continue;
+    if(!opts.anyDate&&!(opts.days!=null?Math.abs(daysBetween(tx.date,row.date))<=opts.days:inWindow(tx,row,mf)))continue;
     for(const accId of accs){
       let v=signedIn(tx,accId);if(v==null)continue;
       const cur=getAcc(accId).currency;if(rowCur&&cur!==rowCur)v=r2(convTo(v,cur,rowCur));
@@ -1331,24 +1332,28 @@ function candidatesFor(row,opts={}){
 }
 function analyzeRows(){
   const imp=ui.imp;const mf=matchFilters();
-  const known=new Set(allTx().map(x=>x.importId).filter(Boolean));
-  const claimed=new Set(imp.rows.filter(r=>r.choiceBy==="user"&&r.choice&&r.choice!=="new").map(r=>r.choice));
+  const known=new Set(allTx().flatMap(x=>[x.importId,...(x.altImportIds||[])]).filter(Boolean));
+  const claimed=new Set(imp.rows.filter(r=>r.choiceBy==="user"&&r.choice&&r.choice!=="new").map(r=>r.choice));imp.rows.forEach(r=>(r.multi||[]).forEach(id=>claimed.add(id)));
   for(const row of imp.rows){
     if(row.error){row.action="error";row.include=false;continue}
     row.accountId=accountForRow(row,imp.accountId);
     if(!row.userCat){row.categoryId="";row.ruleId=null;const r=cfgRules().find(r=>ruleMatches(r,row));
       if(r){row.ruleId=r.id;if(r.ignore){row.action="blocked";row.include=false;row.reason="padrão: ignorar";continue}
-        if(r.categoryId)row.categoryId=r.categoryId;if(r.rename)row.descOut=r.rename;if(r.payeeId)row.payeeId=r.payeeId;else if(r.payee)row.payee=r.payee;if(r.accountId&&!row.forcedAcc)row.accountId=r.accountId}}
+        if(r.categoryId)row.categoryId=r.categoryId;if(r.rename)row.descOut=r.rename;if(r.payeeId)row.payeeId=r.payeeId;else if(r.payee)row.payee=r.payee;if(r.accountId&&!row.forcedAcc)row.accountId=r.accountId}
+      row.sugg=null;if(!row.categoryId){const h=histSuggest(row);if(h){row.categoryId=h.categoryId;row.sugg=h;if(h.payeeId&&!row.payeeId)row.payeeId=h.payeeId}}}
     row.descOut=row.descOut||row.desc;
     const b=blockHit(row);if(b){row.action="blocked";row.include=false;row.reason=(b.type==="source"?"origem bloqueada: ":"texto bloqueado: ")+b.value;continue}
     row.fitid=row.fitid||("imp:"+hash([row.accountId,row.date,row.amount,row.desc].join("|")));
     if(known.has(row.fitid)){row.action="dup";row.include=false;continue}
+    if(row.multi&&row.multi.length){row.multi=row.multi.filter(id=>findTx(id));if(row.multi.length>1){row.action="multi";if(row.include===undefined)row.include=true;continue}row.multi=null}
     row.cands=candidatesFor(row).filter(c=>!claimed.has(c.id)||c.id===row.choice).slice(0,8);
     if(row.choiceBy!=="user"){
       const best=row.cands.find(c=>!claimed.has(c.id));
       if(mf.auto&&best&&best.ad<0.005){row.choice=best.id;row.choiceBy="auto";claimed.add(best.id)}else{row.choice="new";row.choiceBy="auto"}
     }
-    row.action=row.choice&&row.choice!=="new"?"match":"new";
+    row.action=row.choice&&row.choice!=="new"?"match":"new";row.twin=null;
+    if(row.action==="new"&&row.choiceBy!=="user"){const tw=candidatesFor(row,{anyStatus:true,anyAmount:true,days:3}).find(c=>c.ad<0.005&&!claimed.has(c.id)&&["rec","imported","auto"].includes(mState(findTx(c.id))));
+      if(tw){row.action="seen";row.twin=tw.id;claimed.add(tw.id);if(row.include===undefined)row.include=false;continue}}
     if(row.action==="match"&&!row.cands.some(c=>c.id===row.choice)){const tx=findTx(row.choice);if(tx){const accId=[tx.accountId,tx.toAccountId].find(id=>signedIn(tx,id)!=null&&id)||tx.accountId;const v=signedIn(tx,accId);row.cands.unshift({id:tx.id,accId,v,dd:Math.abs(daysBetween(tx.date,row.date)),ad:Math.abs(v-row.amount),score:0})}else{row.choice="new";row.action="new"}}
     if(row.adjust===undefined)row.adjust=true;
     if(row.include===undefined)row.include=true;
@@ -1376,17 +1381,18 @@ function matchPanel(){
 function impRow(r,i){
   const a=getAcc(r.accountId);const cur=a?.currency||r.currency;
   if(r.action==="error")return `<div class="row"><div class="main"><div><span class="pill bad">Sem valor</span> <span class="muted">${esc(r.source)}</span></div><div class="muted" style="font-size:13px;white-space:normal">${esc(r.raw)}</div></div><button class="btn small" data-act="impBlock" data-i="${i}">Bloquear</button></div>`;
-  const st={new:'<span class="pill info">Criar novo</span>',match:r.choiceBy==="user"?'<span class="pill st-rec">Conciliar</span>':'<span class="pill st-auto">Conciliar · a validar</span>',dup:'<span class="pill">Já importado</span>',blocked:'<span class="pill warn">Bloqueado</span>'}[r.action];
+  const st={new:'<span class="pill info">Criar novo</span>',match:r.choiceBy==="user"?'<span class="pill st-rec">Conciliar</span>':'<span class="pill st-auto">Conciliar · a validar</span>',multi:`<span class="pill st-rec">Conciliar com ${(r.multi||[]).length} lançamentos</span>`,seen:'<span class="pill">Já conciliado antes</span>',dup:'<span class="pill">Já importado</span>',blocked:'<span class="pill warn">Bloqueado</span>'}[r.action];
   const m=r.action==="match"?findTx(r.choice):null;const c=m?r.cands.find(x=>x.id===m.id):null;
   const canAct=r.action==="new"||r.action==="match";
   return `<div class="row" style="align-items:flex-start;${r.include?"":"opacity:.6"}">
    <input type="checkbox" data-act="impInc" data-i="${i}" ${r.include?"checked":""} aria-label="Incluir" style="margin-top:6px" ${r.action==="dup"?"disabled":""}>
    <div class="main" style="flex:1;display:flex;flex-direction:column;gap:6px;min-width:0">
-    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">${st}<span class="num muted">${fmtDate(r.date)}</span><span class="muted" style="font-size:13px">${esc(r.source)} · ${esc(r.desc)}</span>${r.ruleId?'<span class="pill">padrão aplicado</span>':""}</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">${st}<span class="num muted">${fmtDate(r.date)}</span><span class="muted" style="font-size:13px">${esc(r.source)} · ${esc(r.desc)}</span>${r.ruleId?'<span class="pill">padrão aplicado</span>':""}${r.sugg&&r.action==="new"?`<span class="pill" title="${r.sugg.n} lançamento(s) parecido(s)">sugerido pelo histórico</span>`:""}</div>
     ${canAct?`<div style="display:flex;gap:8px;flex-wrap:wrap"><select id="imp-ch-${i}" class="btn" data-act="impChoice" data-i="${i}" aria-label="O que fazer" style="flex:1;min-width:200px">
       <option value="new" ${r.action==="new"?"selected":""}>➕ Criar novo lançamento a partir desta linha</option>
       ${r.cands.length?`<optgroup label="Conciliar com (${r.cands.length})">${r.cands.map(x=>`<option value="${x.id}" ${r.choice===x.id?"selected":""}>${esc(candLabel(x,r))}</option>`).join("")}</optgroup>`:'<option disabled>Nenhum lançamento encontrado com os filtros</option>'}
-     </select><button class="btn small" data-act="impSearch" data-i="${i}">Procurar outro…</button></div>`:""}
+     </select><button class="btn small" data-act="impSearch" data-i="${i}">Procurar outro…</button><button class="btn small" data-act="impMulti" data-i="${i}" title="Uma linha do banco corresponde a vários lançamentos">Vários…</button></div>`:""}
+    ${r.action==="multi"?multiRowHtml(r,i):""}
     ${r.action==="new"?`<input id="imp-d-${i}" class="btn" style="cursor:text;width:100%" value="${esc(r.descOut)}" data-act="impDesc" data-i="${i}" aria-label="${t("description")}">
     <div style="display:flex;gap:8px;flex-wrap:wrap">
      <select id="imp-a-${i}" class="btn" data-act="impRowAcc" data-i="${i}" aria-label="${t("account")}" style="flex:1;min-width:140px">${accOptions(r.accountId)}</select>
@@ -1397,17 +1403,18 @@ function impRow(r,i){
       ${m.status==="pending"?'<div class="muted">Previsto → passa a confirmado e conciliado.</div>':""}
       ${c&&c.ad>=0.005?`<label style="display:flex;gap:6px;align-items:center;margin-top:4px"><input type="checkbox" data-act="impAdj" data-i="${i}" ${r.adjust?"checked":""}> Ajustar o valor de ${money(Math.abs(c.v),cur)} para ${money(Math.abs(r.amount),cur)} (valor do banco)</label>`:""}
       ${c&&c.dd?`<div class="muted">Data do lançamento mantida; diferença de ${c.dd} dia(s) para o banco.</div>`:""}</div>`:""}
+    ${r.action==="seen"&&findTx(r.twin)?(tw=>`<div class="muted" style="font-size:13px">Igual a <b>${esc(tw.description||txCatLabel(tw))}</b> de ${fmtDate(tw.date)}, já conciliado${tw.importSnap?" ("+esc(tw.importSnap.source||"")+")":""}. Marque a linha só se for um lançamento diferente: ele será criado como novo.</div>`)(findTx(r.twin)):""}
     ${r.reason?`<div class="muted" style="font-size:13px">${esc(r.reason)}</div>`:""}
    </div>
    <div style="text-align:right;display:flex;flex-direction:column;gap:6px;align-items:flex-end"><span class="num ${r.amount<0?"neg":"pos"}" style="font-weight:600">${money(r.amount,cur)}</span><button class="btn small" data-act="impBlock" data-i="${i}">Bloquear</button></div>
   </div>`;
 }
 function reviewBody(){
-  const imp=ui.imp;const c={new:0,auto:0,user:0,dup:0,blocked:0,error:0};
+  const imp=ui.imp;const c={new:0,auto:0,user:0,multi:0,seen:0,dup:0,blocked:0,error:0};
   imp.rows.forEach(r=>{if(r.action==="match")c[r.choiceBy==="user"?"user":"auto"]++;else c[r.action]=(c[r.action]||0)+1});
-  const sel=imp.rows.filter(r=>r.include&&(r.action==="new"||r.action==="match"));
+  const sel=imp.rows.filter(r=>r.include&&["new","match","multi","seen"].includes(r.action));
   return `${matchPanel()}
-   <div class="tools"><span class="pill info">${c.new} novos</span>${c.user?`<span class="pill st-rec">${c.user} conciliar</span>`:""}${c.auto?`<span class="pill st-auto">${c.auto} conciliar · a validar</span>`:""}${c.dup?`<span class="pill">${c.dup} já importados</span>`:""}${c.blocked?`<span class="pill warn">${c.blocked} bloqueados</span>`:""}${c.error?`<span class="pill bad">${c.error} sem valor</span>`:""}
+   <div class="tools"><span class="pill info">${c.new} novos</span>${c.user?`<span class="pill st-rec">${c.user} conciliar</span>`:""}${c.auto?`<span class="pill st-auto">${c.auto} conciliar · a validar</span>`:""}${c.multi?`<span class="pill st-rec">${c.multi} com vários lançamentos</span>`:""}${c.seen?`<span class="pill">${c.seen} já conciliados antes</span>`:""}${c.dup?`<span class="pill">${c.dup} já importados</span>`:""}${c.blocked?`<span class="pill warn">${c.blocked} bloqueados</span>`:""}${c.error?`<span class="pill bad">${c.error} sem valor</span>`:""}
     <span class="tools" style="margin-left:auto"><button class="btn small" data-act="impAllNew">Tudo como novo</button><button class="btn small" data-act="impAllMatch">Conciliar valores exatos</button></span></div>
    <div class="tools"><label class="muted" style="display:flex;gap:6px;align-items:center;font-size:13px"><input type="checkbox" id="imp-invert" data-act="impInvert" ${imp.invert?"checked":""}> Inverter sinais</label>
     <label class="muted" style="display:flex;gap:6px;align-items:center;font-size:13px"><input type="checkbox" id="imp-learn" data-act="impLearn" ${imp.learn?"checked":""}> Lembrar categorias como padrões</label>
@@ -1451,7 +1458,7 @@ function viewImport(){
       <textarea id="imp-text" rows="7" placeholder="Nubank: Compra de R$ 45,90 aprovada em IFOOD, cartão final 1234.&#10;Boursorama: Paiement CB de 23,40 € chez MONOPRIX le 15/10."></textarea></div>
       <div class="tools" style="margin-top:8px"><button class="btn primary" data-act="impText">Ler mensagens</button></div>
      </section></div>
-     <div class="banner info"><b>Conexão automática (Open Finance Brasil e PSD2/DSP2 na França):</b> exige um servidor com um agregador regulado e o consentimento com autenticação forte no app do banco. Ela entra na versão com backend; o fluxo de revisão e conciliação abaixo já é o mesmo que ela vai usar.</div>`;
+     ${bankImportPanel()}`;
   } else if(imp.table){
     const m=imp.map;const opt=(sel)=>`<option value="-1">—</option>`+m.cols.map((c,i)=>`<option value="${i}" ${sel===i?"selected":""}>${esc(c)}</option>`).join("");
     const preview=imp.table.slice(m.header+1,m.header+6);
@@ -1478,7 +1485,7 @@ function loadXLSX(){if(window.XLSX)return Promise.resolve();if(XLSX_P)return XLS
 async function handleImportFile(f){
   const imp=ui.imp;imp.fileName=f.name;const ext=f.name.split(".").pop().toLowerCase();
   try{
-    if(ext==="ofx"||ext==="qfx"){const {rows,currency}=parseOFX(await f.text());if(!rows.length)throw new Error("nenhuma transação encontrada no OFX");rows.forEach(r=>r.currency=currency);imp.rows=rows;imp.table=null;analyzeRows()}
+    if(ext==="ofx"||ext==="qfx"){const txt=await f.text();const {rows,currency}=parseOFX(txt);imp.bankBal=ofxBalance(txt);if(!rows.length)throw new Error("nenhuma transação encontrada no OFX");rows.forEach(r=>r.currency=currency);imp.rows=rows;imp.table=null;analyzeRows()}
     else if(["xlsx","xls","ods"].includes(ext)){await loadXLSX();const wb=XLSX.read(await f.arrayBuffer(),{type:"array",cellDates:true});const ws=wb.Sheets[wb.SheetNames[0]];
       const table=XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:""}).filter(r=>r.some(c=>String(c).trim()!==""));if(!table.length)throw new Error("planilha vazia");imp.table=table;imp.map=guessMapping(table)}
     else{const table=parseCSVText(await f.text());if(!table.length)throw new Error("arquivo vazio");imp.table=table;imp.map=guessMapping(table)}
@@ -1487,8 +1494,9 @@ async function handleImportFile(f){
 }
 async function commitImport(){
   const imp=ui.imp;const keys=[];let nNew=0,nMatch=0,nAuto=0,nRules=0;const now=new Date().toISOString();
-  for(const r of imp.rows.filter(r=>r.include&&(r.action==="new"||r.action==="match"))){
+  for(const r of imp.rows.filter(r=>r.include&&["new","match","multi","seen"].includes(r.action))){
     const a=getAcc(r.accountId);if(!a)continue;
+    if(r.action==="multi"){nMatch+=commitMultiRow(r,keys,now);continue}
     if(r.action==="match"){const tx=findTx(r.choice);if(!tx)continue;const c=(r.cands||[]).find(x=>x.id===tx.id);
       const u={...tx,prevStatus:tx.status,prevRecon:tx.recon||null,prevImportId:tx.importId||null,status:"paid",recon:r.choiceBy==="user"?"ok":"auto",importId:r.fitid,importSnap:{date:r.date,amount:r2(Math.abs(r.amount)),desc:r.desc,source:r.source,kind:r.amount<0?"expense":"income",importKind:String(r.fitid).startsWith("ntf:")?"ntf":"file"}};
       if(c&&c.ad>=0.005&&r.adjust){const target=r2(convTo(Math.abs(r.amount),a.currency,getAcc(c.accId).currency));
@@ -1496,14 +1504,16 @@ async function commitImport(){
       if(imp.fillDesc!==false&&!u.description)u.description=r.descOut||r.desc;
       if(imp.fillCat!==false&&!u.categoryId&&r.categoryId&&u.kind!=="transfer")u.categoryId=r.categoryId;
       keys.push(putTx(u,tx.date));nMatch++;if(r.choiceBy!=="user")nAuto++;continue}
-    const tx={id:uid(),kind:r.amount<0?"expense":"income",accountId:a.id,date:r.date,amount:r2(Math.abs(r.amount)),description:r.descOut,categoryId:r.categoryId||"",payee:r.payee||"",payeeId:r.payeeId||undefined,costCenter:"",tags:"",notes:r.raw&&r.raw!==r.descOut?r.raw:"",status:"paid",recon:"imported",importKind:String(r.fitid).startsWith("ntf:")?"ntf":"file",importId:r.fitid,origin:r.source,created:now};
+    const tx={id:uid(),kind:r.amount<0?"expense":"income",accountId:a.id,date:r.date,amount:r2(Math.abs(r.amount)),description:r.descOut,categoryId:r.categoryId||"",payee:r.payee||"",payeeId:r.payeeId||undefined,costCenter:"",tags:"",notes:r.raw&&r.raw!==r.descOut?r.raw:"",status:"paid",recon:"imported",importKind:String(r.fitid).startsWith("ntf:")?"ntf":String(r.fitid).startsWith("bank:")?"bank":"file",importId:r.fitid,origin:r.source,created:now};
     if(a.type==="card")tx.invoice=invoiceFor(a,tx.date);
     keys.push(putTx(tx));nNew++;
     if(imp.learn&&r.userCat&&r.categoryId){const k=learnKey(r.desc);if(k.length>=3&&!cfgRules().some(x=>norm(x.pattern)===k)){cfgRules().push({id:uid(),pattern:k,field:"any",categoryId:r.categoryId,rename:r.descOut!==r.desc?r.descOut:"",payee:"",accountId:"",ignore:false,learned:true});nRules++}}
   }
-  if(nRules)saveCfg();
+  for(const r of imp.rows.filter(r=>r.action==="seen"&&!r.include&&r.twin)){const tw=findTx(r.twin);if(tw&&!(tw.altImportIds||[]).includes(r.fitid)){keys.push(putTx({...tw,altImportIds:[...(tw.altImportIds||[]),r.fitid]},tw.date))}}
+  let balMsg="";if(imp.bankBal&&setBankBalance(imp.accountId,imp.bankBal,imp.fileName)){nRules=nRules||0;balMsg=" · saldo do banco registrado"}
+  if(nRules||balMsg)saveCfg();ui.bankWaiting=0;
   ui.imp=freshImport(imp.accountId);render();await flush(keys);
-  toast(`${nNew} criado(s), ${nMatch} conciliado(s)${nAuto?` (${nAuto} a validar)`:""}${nRules?`, ${nRules} padrão(ões) criado(s)`:""}`);
+  toast(`${nNew} criado(s), ${nMatch} conciliado(s)${nAuto?` (${nAuto} a validar)`:""}${nRules?`, ${nRules} padrão(ões) criado(s)`:""}${balMsg}`);
 }
 const freshImport=acc=>({accountId:acc||null,rows:[],table:null,map:null,fileName:"",invert:false,learn:true,mf:null});
 function blockModal(i){
@@ -1519,7 +1529,7 @@ function blockModal(i){
 function ruleModal(rule){
   const isNew=!rule;rule=rule?{...rule}:{id:uid(),pattern:"",field:"any",categoryId:"",rename:"",payee:"",accountId:"",ignore:false};
   openModal(`<h3>${isNew?"Novo padrão":"Editar padrão"}</h3><div class="form">
-   <div class="field"><label for="rl-pat">Se contém o texto</label><input id="rl-pat" value="${esc(rule.pattern)}" placeholder="ex.: ifood"></div>
+   <div class="field"><label for="rl-pat">Se contém o texto</label><input id="rl-pat" value="${esc(rule.pattern)}" placeholder="ex.: ifood | rappi | uber eats"><span class="hint">Use | para várias palavras. O padrão também preenche a categoria ao digitar a descrição de um lançamento novo.</span></div>
    <div class="field"><label for="rl-field">Procurar em</label><select id="rl-field">${[["any","Qualquer parte"],["desc","Descrição"],["source","Origem"]].map(([v,l])=>`<option value="${v}" ${rule.field===v?"selected":""}>${l}</option>`).join("")}</select></div>
    <div class="field"><label for="rl-cat">Então usar a categoria</label><select id="rl-cat">${catOptions("expense",rule.categoryId).replace('<option value="">—</option>','<option value="">— manter —</option>')}${state.cfg.categories.filter(c=>c.type==="income").map(c=>`<option value="${c.id}" ${rule.categoryId===c.id?"selected":""}>${esc(catName(c.id))} (receita)</option>`).join("")}</select></div>
    <div class="field"><label for="rl-acc">Direcionar para a conta</label><select id="rl-acc"><option value="">— manter —</option>${accOptions(rule.accountId)}</select></div>
@@ -1562,6 +1572,8 @@ async function importClick(act,el){
       imp.rows=rows;imp.table=null;analyzeRows();render();return true}
     case "impReset":ui.imp=freshImport(imp.accountId);render();return true;
     case "impSearch":searchModal(+el.dataset.i);return true;
+    case "impMulti":multiModal(+el.dataset.i);return true;
+    case "impMultiOff":{const r=imp.rows[+el.dataset.i];r.multi=null;r.choice="new";r.choiceBy="user";analyzeRows();render();return true}
     case "impAllNew":imp.rows.forEach(r=>{if(r.action==="match"||r.action==="new"){r.choice="new";r.choiceBy="user"}});analyzeRows();render();return true;
     case "impAllMatch":imp.rows.forEach(r=>{if(r.action==="match"||r.action==="new"){r.choiceBy=null}});{const k=matchFilters().auto;matchFilters().auto=true;analyzeRows();matchFilters().auto=k}render();return true;
     case "mfRowAcc":{const mf=matchFilters();mf.rowAcc=!mf.rowAcc;render();return true}
@@ -1593,6 +1605,8 @@ function importChange(act,el){
     case "impCat":r.categoryId=el.value;r.userCat=true;return true;
     case "impChoice":r.choice=el.value;r.choiceBy="user";analyzeRows();render();return true;
     case "impAdj":r.adjust=el.checked;return true;
+    case "impDiffMode":r.diffMode=el.value;render();return true;
+    case "impDiffCat":r.diffCat=el.value;return true;
     case "impFillDesc":imp.fillDesc=el.checked;return true;
     case "impFillCat":imp.fillCat=el.checked;return true;
     case "impMfDays":matchFilters().days=Math.max(0,parseInt(el.value,10)||0);return true;
@@ -1649,7 +1663,7 @@ function stmtSummary(a,key){
   const line=(l,arr,cls="",sign=1)=>`<tr${cls?` class="${cls}"`:""}><td>${l}</td>${arr.map(v=>`<td class="r num ${sign*v<0?"neg":""}">${money(sign*v,a.currency)}</td>`).join("")}</tr>`;
   return `<div class="tablewrap" style="max-width:560px"><table><thead><tr><th>Resumo de ${monthShort(key)}</th><th class="r">Confirmada</th><th class="r">Projetada</th></tr></thead><tbody>
    ${line(t("prevBalance"),rows.prev)}${line(t("income"),rows.inc)}${line(t("expense"),rows.exp,"",-1)}${line("Transferências de entrada",rows.tin)}${line("Transferências de saída",rows.tout,"",-1)}
-   ${line(t("result"),res)}${line("Saldo final",fin,"total")}</tbody></table></div>`;
+   ${line(t("result"),res)}${line("Saldo final",fin,"total")}</tbody></table></div>${bankBalanceCheck(a)}`;
 }
 
 /* batch actions on non-card lists */
@@ -1984,6 +1998,10 @@ function txModal(tx,opts={}){
         rateEl.innerHTML=`${o&&d?`Câmbio da operação: 1 ${a.currency} = ${(d/o).toLocaleString(LOCALE[LANG],{maximumFractionDigits:4})} ${tt.currency}<br>`:""}Câmbio do dia: ${day?day.toLocaleString(LOCALE[LANG],{maximumFractionDigits:4}):"—"} ${tt.currency}`};
       if(rateEl){q("tx-amt").addEventListener("input",rate);q("tx-amtto").addEventListener("input",rate);rate();
         q("tx-fx").onclick=()=>{const a=getAcc(tx.accountId),tt=getAcc(tx.toAccountId);const o=parseNum(q("tx-amt").value);if(o){q("tx-amtto").value=r2(convTo(o,a.currency,tt.currency)).toFixed(2);rate()}}}
+      q("tx-desc")?.addEventListener("change",()=>{readInto();if(st.split||st.kind==="transfer"||tx.categoryId||!tx.description)return;const want=st.kind==="income"&&getAcc(tx.accountId)?.type!=="card"?"income":"expense";
+        const r=ruleForText(tx.description);let msg="";if(r&&r.categoryId&&getCat(r.categoryId)?.type===want){tx.categoryId=r.categoryId;if(r.payeeId&&!tx.payeeId){tx.payeeId=r.payeeId;tx.payee=getParty(r.payeeId)?.name||""}msg="Padrão aplicado: "+catName(r.categoryId)}
+        else{const h=histSuggest({desc:tx.description,amount:want==="income"?1:-1,accountId:tx.accountId});if(h&&getCat(h.categoryId)?.type===want){tx.categoryId=h.categoryId;if(h.payeeId&&!tx.payeeId){tx.payeeId=h.payeeId;tx.payee=getParty(h.payeeId)?.name||""}msg="Categoria sugerida pelo histórico: "+catName(h.categoryId)}}
+        if(msg){const cs=q("tx-cat");if(cs)cs.value=tx.categoryId;const ps=q("tx-party");if(ps&&tx.payeeId)ps.value=tx.payeeId;toast(msg)}});
       q("tx-pnew")?.addEventListener("click",()=>{readInto();st.newParty=true;redraw();setTimeout(()=>q("tx-pname")?.focus(),10)});
       q("tx-pcancel")?.addEventListener("click",()=>{st.newParty=false;redraw()});
       q("tx-padd")?.addEventListener("click",async()=>{const n=q("tx-pname").value.trim();if(!n){toast("Informe o nome.");return}readInto();const p={id:uid(),name:n,type:st.kind==="income"?"client":"supplier",doc:"",contact:"",categoryId:"",notes:""};parties().push(p);tx.payeeId=p.id;tx.payee="";st.newParty=false;redraw();await saveCfg();toast("Cadastro criado")});
@@ -2306,7 +2324,7 @@ document.addEventListener("click",async e=>{
   const act=el.dataset.act;
   if(act==="closeOverlay"){if(e.target===el)closeModal();return}
   if(e.target.closest('[data-stop]')&&act==="edittx")return;
-  if(["sel","selAll","selRows","dailyBal","inclPending","search","budget","import","dashCur","impInc","impInvert","impLearn","impAcc","impFile","impDesc","impRowAcc","impCat","impChoice","impAdj","impFillDesc","impFillCat","impMfDays","impMfFrom","impMfTo","impMfTol","impMfAuto"].includes(act))return;
+  if(["sel","selAll","selRows","dailyBal","inclPending","search","budget","import","dashCur","impInc","impInvert","impLearn","impAcc","impFile","impDesc","impRowAcc","impCat","impChoice","impAdj","impDiffMode","impDiffCat","bnkAuto","impFillDesc","impFillCat","impMfDays","impMfFrom","impMfTo","impMfTol","impMfAuto"].includes(act))return;
   if(!ui.imp)ui.imp=freshImport();
   if(await importClick(act,el))return;
   if(el.tagName==="A")e.preventDefault();
@@ -2760,6 +2778,345 @@ document.addEventListener("click",async e=>{const el=e.target.closest("[data-act
  else if(act==="ioApply"){const pv=ui.io?.preview;const del=pv?pv.results.reduce((s,r)=>s+r.del,0):0;
   if(del)confirmBox(`A importação vai remover ${del} item(ns) que não estão na planilha. Continuar?`,"Importar",ioCommit);else await ioCommit()}
 });
+
+/* ===================== conciliação 2: 1 linha → vários lançamentos, histórico, saldo do banco ===================== */
+/* --- sugestão de categoria e contato pelo histórico --- */
+let HIST=null,HIST_AT=0;
+function histIndex(){
+  const n=allTx().length;if(HIST&&HIST_AT===n)return HIST;
+  const by=new Map();
+  for(const tx of allTx()){
+    if(tx.kind==="transfer"||!tx.categoryId||hasSplits(tx))continue;
+    for(const d of new Set([tx.description,tx.importSnap&&tx.importSnap.desc].filter(Boolean))){
+      const k=learnKey(d);if(k.length<3)continue;
+      const o=by.get(k)||{cats:{},parties:{},n:0};o.n++;o.cats[tx.categoryId]=(o.cats[tx.categoryId]||0)+1;if(tx.payeeId)o.parties[tx.payeeId]=(o.parties[tx.payeeId]||0)+1;by.set(k,o)}
+  }
+  HIST=by;HIST_AT=n;return by;
+}
+function histSuggest(row){
+  const k=learnKey(row.desc||"");if(k.length<3)return null;
+  const idx=histIndex();let o=idx.get(k);
+  if(!o){const kw=new Set(k.split(" "));let best=null,bs=0;
+    for(const [key,v] of idx){const w=key.split(" ");const inter=w.filter(x=>kw.has(x)).length;const sc=inter/Math.max(w.length,kw.size);if(sc>bs&&inter>=1&&w[0]===[...kw][0]){bs=sc;best=v}}
+    if(bs>=0.5)o=best}
+  if(!o)return null;
+  const top=m=>Object.entries(m).sort((a,b)=>b[1]-a[1])[0];
+  const c=top(o.cats);if(!c)return null;
+  const cat=getCat(c[0]);if(!cat)return null;
+  const wantType=row.amount<0?"expense":"income";
+  const acc=getAcc(row.accountId);
+  if(cat.type!==wantType&&!(acc&&acc.type==="card"))return null;
+  const p=top(o.parties);
+  return {categoryId:c[0],payeeId:p&&getParty(p[0])?p[0]:null,n:o.n,share:c[1]/o.n};
+}
+
+/* --- padrões com alternativas: "ifood | rappi | uber eats" --- */
+function rulePatterns(r){return String(r.pattern||"").split("|").map(s=>norm(s)).filter(Boolean)}
+function ruleForText(desc){
+  const hay=norm(desc||"");if(!hay)return null;
+  return cfgRules().find(r=>!r.ignore&&r.field!=="source"&&rulePatterns(r).some(p=>hay.includes(p)))||null;
+}
+
+/* --- 1 linha do banco → vários lançamentos --- */
+function multiInfo(r){
+  const cur=getAcc(r.accountId)?.currency;
+  const items=(r.multi||[]).map(id=>{const tx=findTx(id);if(!tx)return null;
+    const accId=[r.accountId,tx.accountId,tx.toAccountId].find(a=>a&&signedIn(tx,a)!=null);let v=signedIn(tx,accId);
+    const c=getAcc(accId)?.currency;if(cur&&c&&c!==cur)v=r2(convTo(v,c,cur));return {tx,accId,v}}).filter(Boolean);
+  const sum=r2(items.reduce((s,x)=>s+x.v,0));
+  return {items,sum,diff:r2(r.amount-sum),cur};
+}
+function subsetSum(target,list,limit=22){
+  // procura a combinação cuja soma bate com o valor do banco (centavos), preferindo menos itens;
+  // sem soma exata, devolve a mais próxima dentro de 2% (ou 5 unidades) com a diferença
+  const L=list.slice(0,limit).map(x=>({...x,c:Math.round(x.v*100)}));const T=Math.round(target*100);
+  let best=null,near=null,nearD=Infinity;const n=L.length;const tol=Math.max(500,Math.abs(T)*0.02);
+  const walk=(i,acc,picked)=>{if(best&&picked.length>=best.length)return;
+    if(picked.length){if(acc===T){best=picked.slice();return}const d=Math.abs(acc-T);if(d<=tol&&(d<nearD||(d===nearD&&picked.length<near.length))){near=picked.slice();nearD=d}}
+    if(i>=n||picked.length>=8)return;
+    walk(i+1,acc+L[i].c,[...picked,L[i].id]);walk(i+1,acc,picked)};
+  if(n<=22)walk(0,0,[]);
+  if(best)return best;if(near){near.approx=r2(nearD/100);return near}return null;
+}
+function multiModal(i){
+  const r=ui.imp.rows[i];const cur=getAcc(r.accountId)?.currency;
+  const sel=new Set(r.multi||[]);const o={q:"",anyAccount:false,anyDate:false};const vals=new Map();
+  multiInfo(r).items.forEach(x=>vals.set(x.tx.id,x.v));
+  const others=new Set(ui.imp.rows.flatMap((x,j)=>j===i?[]:x.action==="match"?[x.choice]:x.action==="multi"?(x.multi||[]):[]));
+  const cands=()=>candidatesFor(r,{anyAmount:true,days:35,anyAccount:o.anyAccount,anyDate:o.anyDate,anyStatus:false,q:o.q}).filter(c=>!others.has(c.id)).slice(0,80);
+  let list=cands();list.forEach(c=>vals.set(c.id,c.v));
+  const sumLine=()=>{const s=r2([...sel].reduce((a,id)=>a+(vals.get(id)||0),0));const d=r2(r.amount-s);
+    return `<b>${sel.size}</b> selecionado(s) · soma <b class="num">${money(s,cur)}</b> · banco <b class="num">${money(r.amount,cur)}</b> · ${Math.abs(d)<0.005?'<span class="pos">✓ confere</span>':`<span class="neg">diferença ${money(d,cur)}</span>`}`};
+  const rows=()=>list.length?`<div class="list">${list.map(c=>{const tx=findTx(c.id);return `<label class="row st-row st-${txState(tx)}" style="cursor:pointer;justify-content:flex-start;gap:10px"><input type="checkbox" data-mm="${c.id}" ${sel.has(c.id)?"checked":""} style="width:auto"><div class="main" style="flex:1"><b>${esc(tx.description||txCatLabel(tx))}</b><div class="muted" style="font-size:13px">${fmtDate(tx.date)} · ${esc(getAcc(c.accId)?.name||"")} · ${stPill(txState(tx))}${c.dd?` · ${c.dd} dia(s)`:""}</div></div><span class="num ${c.v<0?"neg":"pos"}">${money(c.v,cur)}</span></label>`}).join("")}</div>`:'<p class="muted">Nenhum lançamento com esses critérios. Amplie a busca.</p>';
+  const body=()=>`<h3>Uma linha do banco, vários lançamentos</h3>
+   <p class="muted" style="margin:0">${fmtDate(r.date)} · ${esc(r.desc)} · <b class="num">${money(r.amount,cur)}</b></p>
+   <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><input id="mm-q" class="btn" style="cursor:text;flex:1;min-width:180px" placeholder="Filtrar por descrição, contato, categoria…" value="${esc(o.q)}">
+    ${[["anyAccount","Todas as contas"],["anyDate","Qualquer data"]].map(([k,l])=>`<button class="chip" data-mo="${k}" aria-pressed="${o[k]}">${l}</button>`).join("")}
+    <button class="btn small" id="mm-auto" type="button">Sugerir combinação</button></div>
+   <div id="mm-sum" class="banner info" style="margin:0">${sumLine()}</div>
+   <div id="mm-list" style="max-height:50vh;overflow:auto">${rows()}</div>
+   <div class="actions"><button class="btn" data-act="closeModal">${t("cancel")}</button><button class="btn primary" id="mm-ok">Conciliar com os selecionados</button></div>`;
+  openModal(body(),m=>{const dlg=m.querySelector(".modal");
+    const refresh=(full)=>{if(full){dlg.innerHTML=body();wire()}else{dlg.querySelector("#mm-sum").innerHTML=sumLine()}};
+    const wire=()=>{const q=dlg.querySelector("#mm-q");let tm;q.addEventListener("input",()=>{clearTimeout(tm);tm=setTimeout(()=>{o.q=q.value;list=cands();list.forEach(c=>vals.set(c.id,c.v));dlg.querySelector("#mm-list").innerHTML=rows();refresh(false)},200)});
+      dlg.querySelector("#mm-auto").onclick=()=>{const pool=candidatesFor(r,{anyAmount:true,days:35,anyAccount:o.anyAccount,anyDate:o.anyDate}).filter(c=>!others.has(c.id)).sort((a,b)=>a.dd-b.dd);
+        const pick=subsetSum(r.amount,pool);if(!pick){toast("Nenhuma combinação chega perto do valor do banco. Marque à mão.");return}
+        pool.forEach(c=>vals.set(c.id,c.v));sel.clear();pick.forEach(id=>sel.add(id));o.q="";list=cands();list.forEach(c=>vals.set(c.id,c.v));refresh(true);toast(pick.approx?`Combinação mais próxima: ${pick.length} lançamento(s), sobra ${money(pick.approx,cur)} (tarifa, juros?)`:`Combinação exata de ${pick.length} lançamento(s)`)};
+      dlg.querySelector("#mm-ok").onclick=()=>{if(sel.size<1){toast("Marque ao menos um lançamento.");return}
+        if(sel.size===1){r.choice=[...sel][0];r.choiceBy="user";r.multi=null}else{r.multi=[...sel];r.choiceBy="user";r.choice=null;const info=multiInfo(r);r.diffMode=Math.abs(info.diff)<0.005?"none":"new";r.diffCat=r.diffCat||"";r.diffDesc=r.diffDesc||""}
+        r.include=true;closeModal();analyzeRows();render()}};
+    dlg.addEventListener("change",e=>{const c=e.target.closest("[data-mm]");if(c){c.checked?sel.add(c.dataset.mm):sel.delete(c.dataset.mm);refresh(false)}});
+    dlg.addEventListener("click",e=>{const b=e.target.closest("[data-mo]");if(b){o[b.dataset.mo]=!o[b.dataset.mo];o.q=dlg.querySelector("#mm-q").value;list=cands();list.forEach(c=>vals.set(c.id,c.v));refresh(true)}});
+    wire()});
+}
+function multiRowHtml(r,i){
+  const {items,sum,diff,cur}=multiInfo(r);
+  const diffType=diff<0?"expense":"income";
+  return `<div style="box-shadow:inset 3px 0 0 var(--accent);padding:6px 10px;background:var(--surface);border-radius:4px;font-size:13px;display:flex;flex-direction:column;gap:4px">
+    ${items.map(x=>`<div style="display:flex;gap:8px;justify-content:space-between"><span><b>${esc(x.tx.description||txCatLabel(x.tx))}</b> · ${fmtDate(x.tx.date)} · ${stPill(txState(x.tx))}</span><span class="num">${money(x.v,cur)}</span></div>`).join("")}
+    <div style="display:flex;gap:8px;justify-content:space-between;border-top:1px solid var(--line);padding-top:4px"><span>Soma dos lançamentos</span><b class="num">${money(sum,cur)}</b></div>
+    ${Math.abs(diff)<0.005?'<div class="pos">✓ A soma confere com o banco.</div>':`
+     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><span class="neg">Diferença de ${money(diff,cur)}</span>
+      <select class="btn small" data-act="impDiffMode" data-i="${i}" aria-label="O que fazer com a diferença"><option value="new" ${r.diffMode==="new"?"selected":""}>Lançar a diferença (juros, tarifa, desconto)</option><option value="none" ${r.diffMode==="none"?"selected":""}>Ignorar a diferença</option></select>
+      ${r.diffMode==="new"?`<select class="btn small" data-act="impDiffCat" data-i="${i}" aria-label="Categoria da diferença">${catOptions(diffType,r.diffCat)}</select>`:""}</div>`}
+    <div class="tools"><button class="btn small" data-act="impMulti" data-i="${i}">Alterar seleção</button><button class="btn small" data-act="impMultiOff" data-i="${i}">Desfazer</button></div></div>`;
+}
+function commitMultiRow(r,keys,now){
+  const a=getAcc(r.accountId);const {items,diff}=multiInfo(r);if(!items.length)return 0;
+  const kind=String(r.fitid).startsWith("ntf:")?"ntf":String(r.fitid).startsWith("bank:")?"bank":"file";
+  for(const x of items){const tx=x.tx;
+    const u={...tx,prevStatus:tx.status,prevRecon:tx.recon||null,prevImportId:tx.importId||null,status:"paid",recon:"ok",importId:r.fitid,importGroup:r.fitid,
+      importSnap:{date:r.date,amount:r2(Math.abs(r.amount)),desc:r.desc,source:r.source,kind:r.amount<0?"expense":"income",importKind:kind,group:items.length}};
+    keys.push(putTx(u,tx.date))}
+  if(Math.abs(diff)>=0.005&&r.diffMode==="new"){
+    const d={id:uid(),kind:diff<0?"expense":"income",accountId:a.id,date:r.date,amount:r2(Math.abs(diff)),description:r.diffDesc||("Diferença · "+(r.descOut||r.desc)),categoryId:r.diffCat||"",payee:"",costCenter:"",tags:"",notes:"",status:"paid",recon:"ok",importId:r.fitid+"#dif",importGroup:r.fitid,importKind:kind,origin:r.source,created:now};
+    if(a.type==="card")d.invoice=invoiceFor(a,d.date);keys.push(putTx(d))}
+  return items.length;
+}
+
+/* --- saldo informado pelo banco (OFX ou conexão) --- */
+function ofxBalance(text){
+  const m=text.match(/<LEDGERBAL>([\s\S]*?)(<\/LEDGERBAL>|<AVAILBAL>|$)/i);if(!m)return null;
+  const amt=(m[1].match(/<BALAMT>([^<\r\n]+)/i)||[])[1],dt=(m[1].match(/<DTASOF>([^<\r\n]+)/i)||[])[1];
+  const v=parseNum(String(amt||"").replace(",","."));const d=parseDateAny(dt);
+  return amt!=null&&!isNaN(v)&&d?{amount:r2(v),date:d}:null;
+}
+function setBankBalance(accId,b,src){const a=getAcc(accId);if(!a||!b||b.amount==null)return false;
+  const prev=a.bankBal;if(prev&&prev.date>b.date)return false;a.bankBal={amount:r2(b.amount),date:b.date,src:src||"",at:new Date().toISOString()};return true}
+function bankBalanceCheck(a){
+  const b=a.bankBal;if(!b)return "";
+  const app=r2(balance(a,b.date,false));const d=r2(b.amount-app);
+  const ok=Math.abs(d)<0.005;
+  return `<div class="banner ${ok?"info":"warn"}" style="max-width:560px;margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+   <span>Saldo no banco em ${fmtDate(b.date)}: <b class="num">${money(b.amount,a.currency)}</b>${b.src?` <span class="muted">(${esc(b.src)})</span>`:""} · no app (confirmados): <b class="num">${money(app,a.currency)}</b> · ${ok?'<span class="pos">✓ confere</span>':`<b class="neg">diferença ${money(d,a.currency)}</b>`}</span>
+   ${ok?"":`<button class="btn small" data-act="adjust" data-id="${a.id}">Ajustar saldo</button>`}</div>`;
+}
+
+/* ===================== conexões bancárias (Enable Banking · Pluggy via servidor próprio) ===================== */
+const BANK_COUNTRIES=[["FR","França"],["PT","Portugal"],["ES","Espanha"],["BE","Bélgica"],["DE","Alemanha"],["IT","Itália"],["NL","Países Baixos"],["LU","Luxemburgo"],["IE","Irlanda"],["AT","Áustria"],["FI","Finlândia"]];
+function bankCfg(){const c=state.cfg;if(!c.bank)c.bank={worker:TEST_MODE?"demo":"",auto:true,conns:[]};if(!c.bank.conns)c.bank.conns=[];return c.bank}
+const bankDemo=()=>bankCfg().worker==="demo";
+const bankReady=()=>!!bankCfg().worker;
+function bankRedirectUrl(){return location.origin+location.pathname}
+async function bankCall(path,body){
+  const b=bankCfg();
+  if(bankDemo())return demoBank(path,body||{});
+  if(!b.worker)throw new Error("Configure o endereço do servidor em Conexões bancárias.");
+  let token=null;try{token=FBA&&FBA.currentUser?await FBA.currentUser.getIdToken():null}catch(e){}
+  if(!token)throw new Error("Entre com sua conta Google para usar as conexões bancárias.");
+  const res=await fetch(b.worker.replace(/\/$/,"")+path,{method:"POST",headers:{"Content-Type":"application/json",Authorization:"Bearer "+token},body:JSON.stringify(body||{})});
+  const data=await res.json().catch(()=>({error:"resposta inválida do servidor ("+res.status+")"}));
+  if(!res.ok)throw new Error(data.error||("erro "+res.status));
+  return data;
+}
+/* --- modo demonstração: simula os dois provedores com dados do próprio app --- */
+function demoBank(path,b){
+  const bankNames={FR:["Boursorama","Caisse d'Epargne","BNP Paribas","Société Générale","Crédit Agricole","LCL","N26","Revolut","Qonto"],PT:["Millennium BCP","Caixa Geral"],ES:["Santander","BBVA"],BE:["KBC","Belfius"],DE:["Deutsche Bank","N26"],IT:["Intesa Sanpaolo"],NL:["ING"],LU:["BGL BNP Paribas"],IE:["AIB"],AT:["Erste Bank"],FI:["Nordea"]};
+  const wait=v=>new Promise(r=>setTimeout(()=>r(v),250));
+  if(path==="/eb/aspsps")return wait({aspsps:(bankNames[b.country]||bankNames.FR).map(n=>({name:n,country:b.country||"FR",maxDays:180}))});
+  if(path==="/eb/start")return wait({url:"demo:"+b.state});
+  if(path==="/eb/session"){const n=String(b.code).replace(/^demo-/,"")||"Banco";return wait({session_id:"demo-s-"+uid(),valid_until:new Date(Date.now()+180*864e5).toISOString(),aspsp:{name:n,country:"FR"},accounts:[{id:"demo-"+norm(n).replace(/\W/g,"")+"-cc",name:"Compte courant",number:"FR76 •••• "+(1000+Math.floor(Math.random()*8999)),currency:"EUR",type:"bank"},{id:"demo-"+norm(n).replace(/\W/g,"")+"-cb",name:"Carte Visa",number:"•••• "+(1000+Math.floor(Math.random()*8999)),currency:"EUR",type:"card"}]})}
+  if(path==="/pluggy/accounts")return wait({item:{id:b.item_id,bank:"Nubank (demonstração)",status:"UPDATED"},accounts:[{id:"demo-pl-cc",name:"Conta corrente",number:"0001 / 12345-6",currency:"BRL",type:"bank"},{id:"demo-pl-cc2",name:"Cartão Mastercard",number:"•••• 4321",currency:"BRL",type:"card"}]});
+  if(path==="/pluggy/refresh")return wait({status:"UPDATING"});
+  if(path==="/eb/sync"||path==="/pluggy/sync"){
+    const conn=bankCfg().conns.find(c=>c.accounts.some(a=>a.id===b.account_id));const ext=conn&&conn.accounts.find(a=>a.id===b.account_id);
+    const acc=ext&&getAcc(ext.appAcc);if(!acc)return wait({transactions:[],balance:null});
+    const from=b.date_from||addDay(todayStr(),-30);const today=todayStr();
+    const mine=allTx().filter(tx=>tx.date>=from&&tx.date<=today&&tx.status!=="pending"&&(tx.accountId===acc.id||tx.toAccountId===acc.id)&&!(tx.importId||"").startsWith("bank:")).slice(-6);
+    const out=mine.map((tx,k)=>{const v=signedIn(tx,acc.id);return {id:"d"+tx.id,date:k%2?addDay(tx.date,1):tx.date,amount:v,desc:(v<0?(acc.type==="card"?"CB ":"PRLV ")+(tx.description||"").toUpperCase():"VIR "+(tx.description||"").toUpperCase()).slice(0,40),pending:false}});
+    const pend=allTx().filter(tx=>tx.status==="pending"&&tx.kind==="expense"&&tx.accountId===acc.id&&tx.date<=addDay(today,31)).sort((a,b)=>a.date<b.date?-1:1).slice(0,2);
+    if(pend.length===2){const s=r2(pend.reduce((a,tx)=>a+signedIn(tx,acc.id),0));out.push({id:"dgrp"+pend[0].id,date:today,amount:r2(s-1.9),desc:"PRLV SEPA AGRUPADO (2 contas + tarifa)",pending:false})}
+    const extra=acc.currency==="BRL"?[["IFOOD *RESTAURANTE",-62.9],["UBER *TRIP",-23.4],["PIX RECEBIDO",150]]:[["CB MONOPRIX PARIS",-23.4],["CB BOULANGERIE",-6.8],["CB SNCF INTERNET",-41]];
+    extra.forEach(([d,v],k)=>out.push({id:"dx"+acc.id+k+today,date:addDay(today,-k-1),amount:v,desc:d,pending:false}));
+    const known=new Set(allTx().map(x=>x.importId).filter(Boolean));const pre="bank:"+(path==="/eb/sync"?"eb":"pluggy")+":"+b.account_id+":";return wait({transactions:out,balance:{amount:r2(balance(acc,today,false)+out.filter(t=>t.id.startsWith("dx")&&!known.has(pre+t.id)).reduce((s,t)=>s+t.amount,0)),currency:acc.currency,date:today}});
+  }
+  return wait({});
+}
+/* --- conexão França/UE: Enable Banking --- */
+async function bankConnectEB(renewId){
+  const old=renewId?bankCfg().conns.find(c=>c.id===renewId):null;
+  let country=old?.country||"FR",list=[],q="",picked=old?{name:old.bank,country:old.country}:null,days=180,busy=false;
+  const load=async()=>{try{list=(await bankCall("/eb/aspsps",{country})).aspsps||[]}catch(e){list=[];toast(e.message)}};
+  await load();
+  const body=()=>{const L=list.filter(a=>!q||norm(a.name).includes(norm(q))).slice(0,60);
+    return `<h3>${old?"Renovar consentimento · "+esc(old.bank):"Conectar banco na França ou na UE"}</h3>
+    <p class="muted" style="margin:0">Você será levado ao site do banco para autorizar a leitura das contas (autenticação forte). Só leitura: o app não faz pagamentos.</p>
+    <div class="form"><div class="field"><label for="eb-country">País</label><select id="eb-country">${BANK_COUNTRIES.map(([c,n])=>`<option value="${c}" ${c===country?"selected":""}>${n}</option>`).join("")}</select></div>
+     <div class="field"><label for="eb-q">Banco</label><input id="eb-q" placeholder="Buscar banco…" value="${esc(q)}"></div>
+     <div class="field full"><div class="chips" style="max-height:220px;overflow:auto">${L.map(a=>`<button class="chip" data-aspsp="${esc(a.name)}" aria-pressed="${picked&&picked.name===a.name}">${esc(a.name)}</button>`).join("")||'<span class="muted">Nenhum banco encontrado.</span>'}</div></div>
+     <div class="field"><label for="eb-days">Validade do consentimento (dias)</label><input id="eb-days" type="number" min="1" max="${(list.find(a=>picked&&a.name===picked.name)||{}).maxDays||180}" value="${days}"><span class="hint">Depois disso o banco pede nova autorização.</span></div></div>
+    ${isNative()?'<div class="banner warn">No app Android, faça a conexão pelo site; a sincronização funciona nos dois.</div>':""}
+    <div class="actions"><button class="btn" data-act="closeModal">${t("cancel")}</button><button class="btn primary" id="eb-go" ${picked&&!busy?"":"disabled"}>Ir para o banco</button></div>`};
+  openModal(body(),m=>{const dlg=m.querySelector(".modal");
+    const redraw=()=>{dlg.innerHTML=body();wire()};
+    const wire=()=>{dlg.querySelector("#eb-country").onchange=async e=>{country=e.target.value;picked=null;await load();redraw()};
+      const qi=dlg.querySelector("#eb-q");qi.oninput=()=>{q=qi.value;const pos=qi.selectionStart;redraw();const n=dlg.querySelector("#eb-q");n.focus();n.setSelectionRange(pos,pos)};
+      dlg.querySelector("#eb-days").onchange=e=>{days=Math.max(1,parseInt(e.target.value,10)||90)};
+      dlg.querySelector("#eb-go").onclick=async()=>{if(!picked)return;busy=true;redraw();
+        const st=uid();const pend={state:st,aspsp:picked,days,renew:renewId||null,at:Date.now()};
+        try{localStorage.setItem("mw.bankPending",JSON.stringify(pend))}catch(e){}
+        try{const r=await bankCall("/eb/start",{aspsp:picked,redirect_url:bankRedirectUrl(),state:st,days});
+          if(String(r.url).startsWith("demo:")){closeModal();await bankFinishEB("demo-"+picked.name,st,pend);return}
+          location.href=r.url}catch(e){busy=false;redraw();toast(e.message)}}};
+    dlg.addEventListener("click",e=>{const c=e.target.closest("[data-aspsp]");if(c){picked={name:c.dataset.aspsp,country};const mx=(list.find(a=>a.name===picked.name)||{}).maxDays||180;days=Math.min(days,mx);redraw()}});
+    wire()});
+}
+async function bankFinishEB(code,st,pend){
+  try{
+    const r=await bankCall("/eb/session",{code});
+    const b=bankCfg();let conn=pend.renew?b.conns.find(c=>c.id===pend.renew):null;
+    const accounts=(r.accounts||[]).map(a=>{const prev=conn&&conn.accounts.find(x=>x.number&&x.number===a.number||x.name===a.name);return {...a,appAcc:prev?prev.appAcc:"",lastDate:prev?prev.lastDate:""}});
+    if(conn){Object.assign(conn,{session:r.session_id,validUntil:r.valid_until,accounts,renewedAt:new Date().toISOString()})}
+    else{conn={id:uid(),provider:"eb",bank:(r.aspsp&&r.aspsp.name)||pend.aspsp.name,country:(r.aspsp&&r.aspsp.country)||pend.aspsp.country,session:r.session_id,validUntil:r.valid_until,accounts,created:new Date().toISOString(),lastSync:""};b.conns.push(conn)}
+    await saveCfg();ui.view="cadastros";ui.setTab="bank";render();toast(pend.renew?"Consentimento renovado":"Banco conectado");bankMapModal(conn.id);
+  }catch(e){toast("Não foi possível concluir a conexão: "+e.message)}
+}
+async function bankCheckReturn(){
+  const p=new URLSearchParams(location.search);if(!p.has("state")||!(p.has("code")||p.has("error")))return;
+  let pend=null;try{pend=JSON.parse(localStorage.getItem("mw.bankPending")||"null")}catch(e){}
+  try{history.replaceState(null,"",location.pathname+location.hash)}catch(e){}
+  if(!pend||pend.state!==p.get("state")){toast("Retorno do banco não reconhecido; tente conectar de novo.");return}
+  try{localStorage.removeItem("mw.bankPending")}catch(e){}
+  if(p.has("error")){toast("O banco não autorizou: "+(p.get("error_description")||p.get("error")));return}
+  await bankFinishEB(p.get("code"),pend.state,pend);
+}
+/* --- conexão Brasil: Pluggy (item do Meu Pluggy) --- */
+function bankConnectPluggy(){
+  openModal(`<h3>Conectar banco no Brasil (Pluggy)</h3>
+   <ol style="margin:0;padding-left:20px;line-height:1.6"><li>Em <b>meu.pluggy.ai</b>, entre e conecte seu banco (Nubank, Itaú, Bradesco…), com a autorização no app do banco.</li>
+   <li>No painel da Pluggy, abra sua aplicação › <b>Ir para Demo</b> › menu ⋮ do banco › <b>Copiar Item ID</b>.</li><li>Cole o Item ID abaixo.</li></ol>
+   <div class="form"><div class="field full"><label for="pl-item">Item ID</label><input id="pl-item" placeholder="ex.: 5f9a…-…" value="${bankDemo()?"demo-item-"+uid():""}"></div></div>
+   <div class="actions"><button class="btn" data-act="closeModal">${t("cancel")}</button><button class="btn primary" id="pl-ok">Buscar contas</button></div>`,m=>{
+    m.querySelector("#pl-ok").onclick=async()=>{const id=m.querySelector("#pl-item").value.trim();if(!id){toast("Cole o Item ID.");return}
+      try{const r=await bankCall("/pluggy/accounts",{item_id:id});const b=bankCfg();
+        let conn=b.conns.find(c=>c.provider==="pluggy"&&c.item===id);
+        const accounts=(r.accounts||[]).map(a=>{const prev=conn&&conn.accounts.find(x=>x.id===a.id);return {...a,appAcc:prev?prev.appAcc:"",lastDate:prev?prev.lastDate:""}});
+        if(conn)Object.assign(conn,{accounts,bank:r.item.bank});else{conn={id:uid(),provider:"pluggy",bank:r.item.bank,country:"BR",item:id,accounts,created:new Date().toISOString(),lastSync:""};b.conns.push(conn)}
+        closeModal();await saveCfg();render();toast("Banco conectado");bankMapModal(conn.id)}catch(e){toast(e.message)}};
+  });
+}
+/* --- ligar contas do banco às contas do app --- */
+function bankGuessAcc(ext,used){
+  const accs=activeAccounts().filter(a=>a.currency===ext.currency&&!used.has(a.id));
+  const digits=String(ext.number||"").replace(/\D/g,"").slice(-4);
+  const byMatch=digits&&accs.find(a=>(a.match||"").includes(digits));if(byMatch)return byMatch.id;
+  const wantCard=ext.type==="card";const same=accs.filter(a=>(a.type==="card")===wantCard);
+  return (same.find(a=>norm(a.institution||a.name).includes(norm(bankCfgConnName(ext))))||(same.length===1?same[0]:null))?.id||"";
+}
+function bankCfgConnName(ext){const c=bankCfg().conns.find(c=>c.accounts.includes(ext));return c?c.bank.split(" ")[0]:""}
+function bankMapModal(connId){
+  const conn=bankCfg().conns.find(c=>c.id===connId);if(!conn)return;
+  const used=new Set(bankCfg().conns.flatMap(c=>c.accounts.map(a=>a.appAcc)).filter(Boolean));
+  conn.accounts.forEach(a=>{if(!a.appAcc){const g=bankGuessAcc(a,used);if(g){a.appAcc=g;used.add(g)}}});
+  openModal(`<h3>${esc(conn.bank)} · ligar às contas do app</h3>
+   <p class="muted" style="margin:0">Cada conta do banco alimenta uma conta ou cartão do Mashuca Wallet. Deixe "não importar" para ignorar.</p>
+   <div class="list">${conn.accounts.map((a,i)=>`<div class="row"><div class="main"><b>${esc(a.name)}</b><div class="muted" style="font-size:13px">${esc(a.number||"")} · ${a.currency}${a.type==="card"?" · cartão":""}</div></div>
+    <select id="bm-${i}" style="max-width:52%"><option value="">— não importar —</option>${activeAccounts().filter(x=>x.currency===a.currency).map(x=>`<option value="${x.id}" ${a.appAcc===x.id?"selected":""}>${esc(x.name)}</option>`).join("")}${activeAccounts().some(x=>x.currency!==a.currency)?`<optgroup label="Outras moedas">${activeAccounts().filter(x=>x.currency!==a.currency).map(x=>`<option value="${x.id}" ${a.appAcc===x.id?"selected":""}>${esc(x.name)} (${x.currency})</option>`).join("")}</optgroup>`:""}</select></div>`).join("")}</div>
+   <div class="form"><div class="field"><label for="bm-days">Primeira sincronização: últimos</label><select id="bm-days">${[30,60,90].map(d=>`<option value="${d}" ${d===60?"selected":""}>${d} dias</option>`).join("")}</select></div></div>
+   <div class="actions"><button class="btn" data-act="closeModal">Depois</button><button class="btn primary" id="bm-ok">Salvar e sincronizar</button></div>`,m=>{
+    m.querySelector("#bm-ok").onclick=async()=>{conn.accounts.forEach((a,i)=>{a.appAcc=m.querySelector("#bm-"+i).value});conn.firstDays=+m.querySelector("#bm-days").value||60;closeModal();await saveCfg();await bankSync([conn.id])};
+  });
+}
+/* --- sincronizar: traz as transações para a revisão da importação --- */
+let BANK_BUSY=false;
+async function bankSync(ids,opts={}){
+  if(BANK_BUSY)return;const b=bankCfg();const conns=b.conns.filter(c=>!ids||ids.includes(c.id));
+  if(!conns.length){if(!opts.silent)toast("Nenhum banco conectado.");return}
+  BANK_BUSY=true;if(!opts.silent)toast("Sincronizando com os bancos…");
+  const rows=[],errs=[];let balChanged=false;const today=todayStr();
+  for(const c of conns){
+    if(c.provider==="eb"&&c.validUntil&&c.validUntil.slice(0,10)<today){errs.push(`${c.bank}: consentimento vencido, renove`);continue}
+    for(const ext of c.accounts.filter(a=>a.appAcc&&getAcc(a.appAcc))){
+      const acc=getAcc(ext.appAcc);
+      let from=ext.lastDate?addDay(ext.lastDate,-7):addDay(today,-(c.firstDays||60));if(acc.startDate&&from<acc.startDate)from=acc.startDate;
+      try{const r=await bankCall(c.provider==="eb"?"/eb/sync":"/pluggy/sync",{account_id:ext.id,date_from:from});
+        for(const t of r.transactions||[]){if(t.pending)continue;if(acc.startDate&&t.date<acc.startDate)continue;
+          rows.push({date:t.date,amount:r2(t.amount),desc:t.desc||"Lançamento",raw:t.counterpart||"",source:c.bank,fitid:`bank:${c.provider}:${ext.id}:${t.id}`,forcedAcc:acc.id,currency:acc.currency})}
+        if(r.balance&&setBankBalance(acc.id,r.balance,c.bank))balChanged=true;
+        ext.lastDate=today}
+      catch(e){errs.push(`${c.bank} · ${ext.name}: ${e.message}`)}
+    }
+    c.lastSync=new Date().toISOString();
+  }
+  b.lastAuto=new Date().toISOString();
+  BANK_BUSY=false;await saveCfg();
+  const known=new Set(allTx().flatMap(x=>[x.importId,...(x.altImportIds||[])]).filter(Boolean));const fresh=rows.filter(r=>!known.has(r.fitid));
+  if(errs.length)toast(errs.join(" · "));
+  if(!fresh.length){if(!opts.silent&&!errs.length)toast(balChanged?"Nada novo; saldos dos bancos atualizados.":"Nada novo nos bancos.");if(!opts.silent)render();return}
+  if(opts.silent&&ui.imp&&(ui.imp.rows.length||ui.imp.table)){ui.bankWaiting=fresh.length;render();return}
+  ui.imp=freshImport(fresh[0].forcedAcc);ui.imp.rows=fresh;ui.imp.fileName="Bancos conectados";analyzeRows();
+  if(opts.silent){ui.bankWaiting=fresh.length;render();toast(`${fresh.length} lançamento(s) novo(s) dos bancos para revisar em Importar`);return}
+  ui.view="importar";render();toast(`${fresh.length} lançamento(s) dos bancos para revisar`);
+}
+function bankAutoSync(){
+  if(!state.cfg)return;const b=bankCfg();if(!b.auto||!b.conns.length||!b.worker||bankDemo())return;
+  if(b.lastAuto&&Date.now()-Date.parse(b.lastAuto)<6*3600e3)return;
+  setTimeout(()=>bankSync(null,{silent:true}).catch(()=>{}),1500);
+}
+/* --- telas --- */
+function bankDaysLeft(c){if(!c.validUntil)return null;return Math.ceil((Date.parse(c.validUntil)-Date.now())/864e5)}
+function bankConnRow(c){
+  const left=bankDaysLeft(c);const mapped=c.accounts.filter(a=>a.appAcc&&getAcc(a.appAcc));
+  return `<div class="row" style="align-items:flex-start;flex-wrap:wrap;gap:8px"><div class="main" style="flex:1;min-width:230px"><div><b>${esc(c.bank)}</b> <span class="pill">${c.provider==="eb"?"PSD2 · "+c.country:"Open Finance · BR"}</span>
+    ${left!=null?(left<=0?'<span class="pill bad">consentimento vencido</span>':left<=10?`<span class="pill warn">vence em ${left} dia(s)</span>`:`<span class="pill info">válido por ${left} dias</span>`):""}</div>
+    <div class="muted" style="font-size:13px">${mapped.length?mapped.map(a=>`${esc(a.name)} → ${esc(getAcc(a.appAcc).name)}`).join(" · "):"nenhuma conta ligada"}${c.lastSync?` · última sincronização ${fmtDate(c.lastSync.slice(0,10))} ${c.lastSync.slice(11,16)}`:""}</div></div>
+   <div class="tools" style="justify-content:flex-end"><button class="btn small primary" data-act="bnkSync" data-id="${c.id}">Sincronizar</button><button class="btn small" data-act="bnkMap" data-id="${c.id}">Contas</button>
+    ${c.provider==="eb"?`<button class="btn small" data-act="bnkRenew" data-id="${c.id}">Renovar</button>`:`<button class="btn small" data-act="bnkRefresh" data-id="${c.id}">Atualizar no banco</button>`}
+    <button class="btn small danger" data-act="bnkDel" data-id="${c.id}">Remover</button></div></div>`;
+}
+function bankTab(){
+  const b=bankCfg();
+  return `<section class="panel"><h2>Servidor de conexão<span class="muted">${bankDemo()?"modo demonstração":b.worker?"configurado":"não configurado"}</span></h2>
+   <p class="muted" style="margin:0 0 10px">As chaves do Enable Banking (França/UE) e da Pluggy (Brasil) ficam num servidor seu (Cloudflare Worker, gratuito). O app só recebe as transações. Passo a passo no README, seção 7.</p>
+   <div class="form"><div class="field full"><label for="bnk-url">Endereço do servidor</label><input id="bnk-url" placeholder="https://mashuca-bank.SEU-USUARIO.workers.dev" value="${esc(b.worker)}"><span class="hint">Digite <b>demo</b> para testar o fluxo com dados simulados.</span></div></div>
+   <div class="tools" style="margin-top:8px"><button class="btn primary" data-act="bnkSave">${t("save")}</button><button class="btn" data-act="bnkTest">Testar servidor</button>
+    <label class="muted" style="display:flex;gap:6px;align-items:center;font-size:13px"><input type="checkbox" data-act="bnkAuto" ${b.auto?"checked":""} style="width:auto"> Sincronizar ao abrir o app (a cada 6 h)</label></div></section>
+   <section class="panel"><h2>Bancos conectados<span class="tools"><button class="btn small" data-act="bnkAddEB" ${bankReady()?"":"disabled"}>+ França / UE</button><button class="btn small" data-act="bnkAddPl" ${bankReady()?"":"disabled"}>+ Brasil</button>${b.conns.length?`<button class="btn small primary" data-act="bnkSyncAll">Sincronizar tudo</button>`:""}</span></h2>
+    ${b.conns.length?`<div class="list">${b.conns.map(bankConnRow).join("")}</div>`:`<p class="muted">${bankReady()?"Nenhum banco conectado ainda.":"Configure o servidor acima (ou use demo) para conectar bancos."}</p>`}
+    <p class="muted" style="font-size:13px;margin:8px 0 0">As transações chegam na tela Importar para revisão: o app concilia com o que você já lançou (valor e data), aplica padrões e o histórico de categorias, e só grava depois que você confirma.</p></section>`;
+}
+function bankImportPanel(){
+  const b=state.cfg?bankCfg():null;if(!b)return "";
+  if(!b.conns.length)return `<div class="banner info" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span><b>Conexão automática com bancos:</b> França/UE pelo Enable Banking (PSD2) e Brasil pela Pluggy (Open Finance), com seu próprio servidor.</span><button class="btn small" data-act="gotoSet" data-tab="bank">Conectar bancos</button></div>`;
+  return `<section class="panel"><h2>Bancos conectados<span class="tools"><button class="btn small primary" data-act="bnkSyncAll">Sincronizar agora</button></span></h2><div class="muted" style="font-size:13px">${b.conns.map(c=>{const l=bankDaysLeft(c);return `${esc(c.bank)}${c.lastSync?` · ${fmtDate(c.lastSync.slice(0,10))}`:" · nunca"}${l!=null&&l<=10?` <span class="pill ${l<=0?"bad":"warn"}">${l<=0?"renovar":"vence em "+l+" d"}</span>`:""}`}).join(" &nbsp;·&nbsp; ")}</div></section>`;
+}
+document.addEventListener("click",async e=>{const el=e.target.closest("[data-act]");if(!el)return;const act=el.dataset.act;if(!act.startsWith("bnk")||el.tagName==="INPUT")return;
+  const b=bankCfg();const id=el.dataset.id;
+  try{
+    if(act==="bnkSave"){b.worker=$("#bnk-url").value.trim().replace(/\/$/,"");await saveCfg();render();toast("Servidor salvo")}
+    else if(act==="bnkTest"){const u=($("#bnk-url").value.trim()||b.worker).replace(/\/$/,"");if(u==="demo"){toast("Modo demonstração ativo");return}if(!u){toast("Informe o endereço.");return}
+      const r=await fetch(u+"/health").then(x=>x.json());toast(`Servidor respondeu · França/UE ${r.enableBanking?"✓":"✗ (faltam chaves)"} · Brasil ${r.pluggy?"✓":"✗ (faltam chaves)"}`)}
+    else if(act==="bnkAddEB")await bankConnectEB();
+    else if(act==="bnkAddPl")bankConnectPluggy();
+    else if(act==="bnkRenew")await bankConnectEB(id);
+    else if(act==="bnkMap")bankMapModal(id);
+    else if(act==="bnkSync")await bankSync([id]);
+    else if(act==="bnkSyncAll")await bankSync(null);
+    else if(act==="bnkRefresh"){const c=b.conns.find(x=>x.id===id);await bankCall("/pluggy/refresh",{item_id:c.item});toast("Atualização pedida ao banco; sincronize em alguns minutos.")}
+    else if(act==="bnkDel"){const c=b.conns.find(x=>x.id===id);confirmBox(`Remover a conexão com ${c.bank}? Os lançamentos já importados continuam.`,"Remover",async()=>{b.conns=b.conns.filter(x=>x.id!==id);render();await saveCfg()})}
+  }catch(err){toast(err.message||String(err))}
+});
+document.addEventListener("change",async e=>{const el=e.target;if(el.dataset?.act!=="bnkAuto")return;bankCfg().auto=el.checked;await saveCfg()});
 
 boot();
 </script>
