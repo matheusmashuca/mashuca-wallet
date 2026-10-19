@@ -1,0 +1,18 @@
+{
+  "appId": "com.mashuca.wallet",
+  "appName": "Mashuca Wallet",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": false
+  },
+  "plugins": {
+    "FirebaseAuthentication": {
+      "skipNativeAuth": true,
+      "providers": ["google.com"]
+    },
+    "SplashScreen": {
+      "launchShowDuration": 800,
+      "backgroundColor": "#ffffff"
+    }
+  }
+}

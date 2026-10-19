@@ -1,0 +1,28 @@
+{
+  "name": "mashuca-wallet",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Mashuca Wallet \u2014 finan\u00e7as pessoais multimoeda (web + Android)",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs && node scripts/update-fx.mjs",
+    "serve": "npx --yes http-server www -p 8080 -c-1",
+    "android:add": "npx cap add android && node scripts/android-setup.mjs",
+    "android:sync": "npm run build && npx cap sync android",
+    "android:icons": "npx @capacitor/assets generate --android",
+    "android:open": "npx cap open android"
+  },
+  "dependencies": {
+    "@capacitor-firebase/authentication": "^8.5.2",
+    "@capacitor/android": "^8.5.3",
+    "@capacitor/core": "^8.5.3",
+    "firebase": "^12.19.0"
+  },
+  "devDependencies": {
+    "@capacitor/assets": "^3.0.5",
+    "@capacitor/cli": "^8.5.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

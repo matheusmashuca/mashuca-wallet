@@ -1,0 +1,40 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function myEmail() { return request.auth.token.email.lower(); }
+
+    // Dados pessoais: só o próprio usuário
+    match /users/{uid}/{document=**} {
+      allow read, write: if signedIn() && request.auth.uid == uid;
+    }
+
+    // Contas e cartões compartilhados
+    match /shared/{acc} {
+      function isOwner() { return signedIn() && resource.data.owner == request.auth.uid; }
+      function isMember() { return signedIn() && request.auth.token.email_verified == true
+                                   && myEmail() in resource.data.emails; }
+
+      allow read: if isOwner() || isMember();
+      allow create: if signedIn() && request.resource.data.owner == request.auth.uid
+                    && request.resource.data.emails is list;
+      // dono altera tudo (menos o dono); convidado só pode se remover da lista
+      allow update: if (isOwner() && request.resource.data.owner == resource.data.owner)
+                    || (isMember()
+                        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['emails'])
+                        && !(myEmail() in request.resource.data.emails));
+      allow delete: if isOwner();
+
+      match /months/{month} {
+        function parent() { return get(/databases/$(database)/documents/shared/$(acc)).data; }
+        allow read, write: if signedIn() && (parent().owner == request.auth.uid
+                              || (request.auth.token.email_verified == true && myEmail() in parent().emails));
+      }
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
