@@ -70,15 +70,37 @@ jobs:
           KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           if [ -z "$KS_B64" ]; then echo "::error::Crie os secrets da chave de upload (veja o README)"; exit 1; fi
-          echo "$KS_B64" | base64 -d > upload.jks
+          if [ -z "$KS_PASS" ]; then echo "::error::Crie o secret ANDROID_KEYSTORE_PASSWORD"; exit 1; fi
+          if ! printf '%s' "$KS_B64" | tr -d ' \r\n\t' | base64 -d > upload.jks 2>/dev/null; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 não é um texto base64 válido. Copie de novo TODO o conteúdo de ANDROID_KEYSTORE_BASE64.txt (uma linha longa, ~3.600 caracteres)."; exit 1; fi
+          echo "Chave decodificada: $(wc -c < upload.jks) bytes (o normal é ~2.700)"
+          if ! keytool -list -keystore upload.jks -storepass "$KS_PASS" >/dev/null 2>&1; then
+            if [ "$(wc -c < upload.jks)" -lt 2000 ]; then
+              echo "::error::O conteúdo de ANDROID_KEYSTORE_BASE64 parece incompleto ($(wc -c < upload.jks) bytes). Copie de novo todo o ANDROID_KEYSTORE_BASE64.txt."
+            else
+              echo "::error::A senha em ANDROID_KEYSTORE_PASSWORD não abre a chave. Use exatamente a senha que estava nesse secret quando você rodou 'Criar chave Android' (ou gere uma chave nova: veja o README)."
+            fi
+            exit 1
+          fi
+          ALIAS="${KEY_ALIAS:-upload}"
+          if ! keytool -list -keystore upload.jks -storepass "$KS_PASS" -alias "$ALIAS" >/dev/null 2>&1; then
+            FOUND=$(keytool -list -keystore upload.jks -storepass "$KS_PASS" 2>/dev/null | awk -F, '/PrivateKeyEntry/{print $1; exit}')
+            echo "::warning::O alias '$ALIAS' (ANDROID_KEY_ALIAS) não existe na chave; usando '$FOUND'."
+            ALIAS="$FOUND"
+          fi
           AAB=android/app/build/outputs/bundle/release/app-release.aab
-          jarsigner -sigalg SHA256withRSA -digestalg SHA-256 -keystore upload.jks -storepass "$KS_PASS" -keypass "$KEY_PASS" "$AAB" "$KEY_ALIAS"
+          KP="${KEY_PASS:-$KS_PASS}"
+          if ! jarsigner -sigalg SHA256withRSA -digestalg SHA-256 -keystore upload.jks -storepass "$KS_PASS" -keypass "$KP" "$AAB" "$ALIAS" >/dev/null 2>&1; then
+            echo "::warning::ANDROID_KEY_PASSWORD não confere; usando a senha do keystore (chaves PKCS12 usam uma só senha)."
+            KP="$KS_PASS"
+            jarsigner -sigalg SHA256withRSA -digestalg SHA-256 -keystore upload.jks -storepass "$KS_PASS" -keypass "$KP" "$AAB" "$ALIAS"
+          fi
           jarsigner -verify "$AAB"
           mkdir -p dist
           cp "$AAB" "dist/mashuca-wallet-${VERSION_NAME}-${VERSION_CODE}.aab"
           BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
           "$BT/zipalign" -p -f 4 android/app/build/outputs/apk/release/app-release-unsigned.apk aligned.apk
-          "$BT/apksigner" sign --ks upload.jks --ks-pass pass:"$KS_PASS" --ks-key-alias "$KEY_ALIAS" --key-pass pass:"$KEY_PASS" --out "dist/mashuca-wallet-${VERSION_NAME}-teste.apk" aligned.apk
+          "$BT/apksigner" sign --ks upload.jks --ks-pass pass:"$KS_PASS" --ks-key-alias "$ALIAS" --key-pass pass:"$KP" --out "dist/mashuca-wallet-${VERSION_NAME}-teste.apk" aligned.apk
           "$BT/apksigner" verify "dist/mashuca-wallet-${VERSION_NAME}-teste.apk"
           rm aligned.apk
           rm upload.jks
